@@ -1,0 +1,225 @@
+#include <math.h>
+#include <pbr.h>
+#include "fur.h"
+
+import fur_eval;
+
+cvex fur_sample(
+    vector u = 0;               // Outgoing light direction, from the surface
+                                // to the viewer
+    float sx = 0;               // Uniform random value between 0 and 1, 
+                                // correlated with sy in a 2D sampling pattern
+    float sy = 0;               // Uniform random value between 0 and 1, 
+                                // correlated with sx in a 2D sampling pattern
+    int bounces = 0;            // A mask specifying the type of reflections 
+                                // that should be evaluated
+
+    export vector refl = 0;     // The reflectivity (albedo) of the bsdf, 
+                                // tinted by the color of the light in the 
+                                // sampled direction. The luminance of this 
+                                // value should match refl from the evaluation
+                                // function. If the sampling distribution does
+                                // not match the evaluation function exactly, 
+                                // this value should be scaled by the ratio of
+                                // the evaluation  distribution to the sampling 
+                                // distribution.
+
+    export vector v = 0;        // Sampled light direction, from the surface to
+                                // the light
+    export int bouncetype = 0;  // The specific component type selected by 
+                                // sampling
+    export float pdf = 0;       // The sampling pdf. The integral of this value
+                                // over the sphere 
+                                // should be a constant 2*PI note that this 
+                                // differs from the pdf produced by the 
+                                // evaluation function by a factor of 
+                                // luminance(refl).
+    int bouncemasklabels = 0;
+    vector nN = 0;
+
+    // User Hair Paramenetrs
+    vector tip = 0;             // Vector in a direction of the strand, from
+                                // root to tip
+    float h = 0;                // The offset along the curve width where the 
+                                // ray intersected 
+                                // the oriented ribbon. [-1, 1]
+    float eta = 1.55;           // The index of refraction of the interior of 
+                                // the hair
+    vector colour = 0.75;       // Colour of the hair. Used to calculate the 
+                                // absorption coefficient of the hair interior
+    float beta_m = 0.25;        // The longitudinal roughness of the hair.[0, 1]
+    float beta_n = 0.3;         // The azimuthal roughness of the hair. [0, 1]
+    float alpha = 2;            // the angle that the small scales on the 
+                                // surface of hair are offset from the base 
+                                // cylinder, expressed in degrees
+
+    // User Fur Parameters
+    vector colour_m = 0.5;      // absorption coefficient in medulla
+    float sigma_m_s = 0.5;      // scattering coefficient in medulla
+    float k = 0;                // medulla index
+    float cuticle_layers = 2;   // layers of cuticle (originaly named l)
+
+    // Internal Parameter
+    float lobe = 0;
+)
+{
+    if (bounces & bouncemasklabels)
+    {
+        
+        // ------------- GENERAL ------------
+
+        float p = lobe; 
+
+        float SqrtPiOver8 = 0.626657069; // float SqrtPiOver8 = sqrt(Pi/8);
+
+        float l_variance[];
+        l_variance[0] = pow(0.726 * beta_m + 0.812 * pow(beta_m, 2) + 
+                        3.7 * pow(beta_m, 20), 2);
+        l_variance[1] = 0.25 * l_variance[0];
+        l_variance[2] = 4 * l_variance[0];
+
+        l_variance[3] = l_variance[1];
+        l_variance[4] = l_variance[2];
+
+        float a_scale = SqrtPiOver8 * (0.256 * beta_n + 1.194 * pow(beta_n, 2)+ 
+                        5.372 * pow(beta_n, 22));
+
+        vector sigma_a = {0,0,0};
+
+        vector colour_t;
+        for (int i = 0; i < 3; i++)
+            colour_t[i] = max(colour[i], 0.001);
+
+        for (int i = 0; i < 3; i++)
+        {
+            sigma_a[i] = pow(log(colour_t[i]) / (5.969 - 0.215 * beta_n +2.532*
+                         pow(beta_n, 2) - 10.73 * pow(beta_n, 3) + 5.574 * 
+                         pow(beta_n, 4) + 0.245 * pow(beta_n, 5)), 2);
+        }
+
+        vector sigma_m_a = {0,0,0};
+
+        for (int i = 0; i < 3; i++)
+            colour_t[i] = max(colour_m[i], 0.001);
+
+        for (int i = 0; i < 3; i++)
+        {
+            sigma_m_a[i] = pow(log(colour_t[i]) / (5.969 - 0.215 * beta_n +2.532*
+                           pow(beta_n, 2) - 10.73 * pow(beta_n, 3) + 5.574 * 
+                           pow(beta_n, 4) + 0.245 * pow(beta_n, 5)), 2);
+        }
+
+        float gammaO = asin(h);
+
+        // ------------- V ------------
+
+        float thetaI = PI/2.0 - acos(clamp(dot(tip, u), -1.0, 1.0));
+        float sinThetaI = sin(thetaI);
+        float cosThetaI = cos(thetaI);
+
+        float thetaMin = 0.5*(thetaI - PI/2);
+        float thetaMax = 0.5*(thetaI + PI/2);
+
+        float sinThetaO = SampleMp(cosThetaI, sinThetaI, sx, sy, 
+                                   l_variance[p]);
+        float cosThetaO = sqrt(1 - sinThetaO*sinThetaO);
+
+        float thetaO = asin(clamp(sinThetaO, -1, 1));
+        float thetaD = (thetaO - thetaI)*0.5;
+        float cosThetaD = cos(thetaD);
+
+        float phi = 2 * asin(2 * sy - 1);
+        if (lobe == 1) phi = PI - phi;
+
+        vector framex, framey;
+        makebasis(framex, framey, tip, u);
+
+        v = tip*sinThetaO + cosThetaO*(sin(phi)*framex - cos(phi)*framey);
+
+        // ---------- PDF ---------------
+
+
+        float sinThetaIp, cosThetaIp;
+
+        if (lobe == 0)
+        {
+            float thetaIR   = thetaI - 2 * radians(alpha);
+            cosThetaIp = cos(thetaIR);
+            sinThetaIp = sin(thetaIR);
+        } 
+        if ((lobe == 1) || (lobe == 3))
+        {
+            float thetaITT  = thetaI + radians(alpha);
+            cosThetaIp = cos(thetaITT);
+            sinThetaIp = sin(thetaITT);
+        }
+        if ((lobe == 2) || (lobe == 4))
+        {
+            float thetaITRT = thetaI + 4 * radians(alpha);
+            cosThetaIp = cos(thetaITRT);
+            sinThetaIp = sin(thetaITRT);
+        }
+        cosThetaIp = abs(cosThetaIp);
+
+        float etap = sqrt(eta*eta - sinThetaO*sinThetaO)/cosThetaO;
+        float sinGammaT = h/etap;
+        float cosGammaT = sqrt(1 - sinGammaT*sinGammaT);
+        float gammaT = asin(sinGammaT);
+
+        float sinThetaT = sinThetaO / eta;
+        float cosThetaT = sqrt(1 - sinThetaT*sinThetaT); 
+
+        // Question about first variable in sampleTrimmedLogistic. 
+        // It may be just sx or sy
+        float dphi = Phi(p, gammaO, gammaT) + 
+                     sampleTrimmedLogistic((sy + sx) / 2, a_scale, -PI, PI);
+
+        float apPdf = ComputeApPdf(cosThetaO, eta, h, sigma_a, lobe, 
+                                   cuticle_layers, sigma_m_a, sigma_m_s, k);
+        float mp = Mp(cosThetaIp, cosThetaO, sinThetaIp, sinThetaO, 
+                      l_variance[lobe], lobe);
+        float np = Np(dphi, lobe, a_scale, gammaO, gammaT);
+
+        float pdf_t = mp * np * apPdf;
+
+        pdf_t /= 8*cosThetaO;
+        // Mantra requires pdf to integrate over the sphere
+	    pdf_t *= PI;
+
+        pdf = pdf_t;
+
+        // ----------- REFL -------------
+
+        vector eval;
+        vector refl_t;
+        fur_eval(
+            "u", u,
+            "v", v,
+            "bounces", bounces,
+
+            "eval", refl_t,
+
+            "bouncemasklabels", bouncemasklabels,
+            "nN", nN,
+            "tip", tip,
+            "h", h,
+            "eta", eta,
+            "colour", colour,
+            "beta_m", beta_m,
+            "beta_n", beta_n,
+            "alpha", alpha,
+
+            "colour_m", colour_m,
+            "sigma_m_s", sigma_m_s,
+            "k", k,
+            "cuticle_layers", cuticle_layers,
+
+            "lobe", lobe
+        );
+
+        refl = refl_t / pdf*2;
+
+        bouncetype = bouncemasklabels;
+    }
+}
+

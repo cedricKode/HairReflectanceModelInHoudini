@@ -1,0 +1,173 @@
+#include <math.h>
+#include <pbr.h>
+#include "extended_hair.h"
+
+cvex extended_hair_eval(
+    vector u = 0;           // Outgoing light direction, from the surface to
+                            // the viewer
+
+    vector v = 0;           // Incoming light direction, from the surface to 
+                            // the light
+
+    int bounces = 0;        // A mask specifying the type of reflections that
+                            // should be evaluated
+
+    export vector refl = 0; // The reflectivity (albedo) of the bsdf
+
+    export vector eval = 0; // The evaluated reflectance for the given 
+                            // directions
+
+    export float pdf = 0;   // The sampling pdf for the given directions.
+                            // The integral of this value over the sphere 
+                            // should be equal to luminance(refl)*2*PI.
+                            // For perfect importance sampling, 
+                            // pdf == luminance(eval).
+    int bouncemasklabels = 0;
+    vector nN = 0;
+
+    // User Hair Paramenetrs
+    vector tip = 0;         // Vector in a direction of the strand, from 
+                            // root to tip
+    float h = 0;            // The offset along the curve width where the ray
+                            // intersected 
+                            // the oriented ribbon. [-1, 1]
+    float eta = 1.55;       // The index of refraction of the interior of the
+                            // hair
+    vector colour = 0.75;   // Colour of the hair. Used to calculate the 
+                            // absorption 
+                            // coefficient of the hair interior
+    float beta_m = 0.25;    // The longitudinal roughness of the hair. [0, 1]
+    float beta_n = 0.3;     // The azimuthal roughness of the hair. [0, 1]
+    float alpha = 2;        // the angle that the small scales on the surface 
+                            // of hair are offset from the base cylinder, 
+                            // expressed in degrees
+
+    // Internal Parameter
+    float lobe = 0;
+)
+{
+    if (bounces & bouncemasklabels)
+    {
+
+        // ------------- GENERAL ------------
+
+        float SqrtPiOver8 = 0.626657069; // float SqrtPiOver8 = sqrt(Pi/8);
+
+        float l_variance[];
+        l_variance[0] = pow(0.726 * beta_m + 0.812 * pow(beta_m, 2) + 
+                        3.7 * pow(beta_m, 20), 2);
+        l_variance[1] = 0.25 * l_variance[0];
+        l_variance[2] = 4 * l_variance[0];
+
+        float a_scale = SqrtPiOver8 * (0.256 * beta_n + 1.194 * pow(beta_n, 2)+
+                        5.372 * pow(beta_n, 22));
+
+        vector sigma_a = {0,0,0};
+
+        vector colour_t;
+        for (int i = 0; i < 3; i++)
+            colour_t[i] = max(colour[i], 0.001);
+
+        for (int i = 0; i < 3; i++)
+        {
+            sigma_a[i] = pow(log(colour_t[i]) / (5.969 - 0.215 * beta_n +2.532*
+                         pow(beta_n, 2) - 10.73 * pow(beta_n, 3) + 5.574 * 
+                         pow(beta_n, 4) + 0.245 * pow(beta_n, 5)), 2);
+        }
+
+        float gammaO = asin(h);
+
+        // ------------- EVAL ------------
+
+        // Longitudinal Angles
+        float thetaI = PI/2.0 - acos(clamp(dot(tip, u), -1.0, 1.0));
+	    float thetaO = PI/2.0 - acos(clamp(dot(tip, v), -1.0, 1.0));
+
+        float sinThetaI = sin(thetaI);
+        float cosThetaI = sqrt(1 - sinThetaI*sinThetaI);
+        float sinThetaO = sin(thetaO);
+        float cosThetaO = sqrt(1 - sinThetaO*sinThetaO);
+
+        // Azimuthal Difference Angle
+        vector u_proj = normalize(u - dot(u, tip) * tip);
+        vector v_proj = normalize(v - dot(v, tip) * tip);
+        float phi = 2 * acos(dot(u_proj, v_proj));
+        assert(0.0 <= phi && phi <= 2 * PI);
+
+
+        float sinThetaT = sinThetaO / eta;
+        float cosThetaT = sqrt(1 - sinThetaT*sinThetaT); 
+
+        float etap = sqrt(eta*eta - sinThetaO*sinThetaO) / cosThetaO;
+        float sinGammaT = h/etap;
+        float cosGammaT = sqrt(1 - sinGammaT*sinGammaT);
+        float gammaT = asin(sinGammaT);
+
+        // Internal path length (d'Eon et al.'s paper). 
+        float l = 2 * cosGammaT;
+        vector sigma_ap = sigma_a * 2 * PI / cosThetaT; 
+        vector T = exp(-sigma_ap * l);
+
+        vector ap = Ap(cosThetaO, eta, h, T, lobe); 
+
+        float sinThetaIp, cosThetaIp;
+
+        if (lobe == 0)
+        {
+            float thetaIR   = thetaI - 2 * radians(alpha);
+            cosThetaIp = cos(thetaIR);
+            sinThetaIp = sin(thetaIR);
+        } 
+        if (lobe == 1)
+        {
+            float thetaITT  = thetaI + radians(alpha);
+            cosThetaIp = cos(thetaITT);
+            sinThetaIp = sin(thetaITT);
+        }
+        if (lobe == 2)
+        {
+            float thetaITRT = thetaI + 4 * radians(alpha);
+            cosThetaIp = cos(thetaITRT);
+            sinThetaIp = sin(thetaITRT);
+        }
+
+        cosThetaIp = abs(cosThetaIp);
+        
+        float mp = Mp(cosThetaIp, cosThetaO, sinThetaIp, sinThetaO, 
+                      l_variance[lobe]);
+        float np = Np(phi, lobe, a_scale, gammaO, gammaT); 
+        vector fsum = mp * ap * np; 
+        eval = fsum;
+
+
+        // ------------------ REFL ------------------
+
+        float refl_t = 0;
+        if (lobe == 0)
+        {
+            refl_t = albedoCos(thetaI, h * PI * 0.5, beta_m * PI);
+        }
+        else 
+        {
+            refl_t = albedoGaussian(thetaI, h * PI * 0.5, beta_m * PI, PI, 
+                                    beta_n * PI);
+        }
+        refl = refl_t;
+
+        // ------------------ PDF -----------------
+
+        float apPdf = ComputeApPdf(cosThetaO, eta, h, sigma_a, lobe);
+        mp = Mp(cosThetaIp, cosThetaO, sinThetaIp, sinThetaO, 
+                l_variance[lobe]);
+        np = Np(phi, lobe, a_scale, gammaO, gammaT);
+        float pdf_t = mp * apPdf * np;
+
+
+        pdf_t /= 8*cosThetaO;
+        // Mantra requires pdf to integrate over the sphere
+	    pdf_t *= PI;
+        pdf_t *= refl_t; 
+
+        pdf = pdf_t;
+    }
+}
